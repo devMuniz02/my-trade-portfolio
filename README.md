@@ -1,10 +1,10 @@
-# [Project Name]
+# My Trade Portfolio
 
-> [Brief description of the project - one or two sentences]
+> This repo contains my number of trades and PnL. Daily, Weekly, Monthly, and All-Time. This portfolio is based on predicitons and probalities of the trades only, no speculations, politics nor anything related.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![GitHub issues](https://img.shields.io/github/issues/devMuniz02/[repo-name])](https://github.com/devMuniz02/[repo-name]/issues)
-[![GitHub stars](https://img.shields.io/github/stars/devMuniz02/[repo-name])](https://github.com/devMuniz02/[repo-name]/stargazers)
+[![GitHub issues](https://img.shields.io/github/issues/devMuniz02/my-trade-portfolio)](https://github.com/devMuniz02/my-trade-portfolio/issues)
+[![GitHub stars](https://img.shields.io/github/stars/devMuniz02/my-trade-portfolio)](https://github.com/devMuniz02/my-trade-portfolio/stargazers)
 
 ## 📋 Table of Contents
 
@@ -19,32 +19,31 @@
 
 ## ✨ Features
 
-- [Feature 1]
-- [Feature 2]
-- [Feature 3]
-- [Add more features as needed]
+This project provides:
+- Automated tracking of your number of trades and PnL (Profit and Loss) for Daily, Weekly, Monthly, and All-Time periods
+- GIF visualization of portfolio performance using Polymarket data
+- Easy configuration via environment variables
 
 ## 🚀 Installation
 
 ### Prerequisites
 
-- [List prerequisites, e.g., Node.js v16+, Python 3.8+, etc.]
+- Python 3.8+ (recommended)
+- Node.js v16+ (if using npm features)
 
 ### Installation Steps
 
 ```bash
 # Clone the repository
-git clone https://github.com/devMuniz02/[repo-name].git
+git clone https://github.com/devMuniz02/my-trade-portfolio.git
 
 # Navigate to the project directory
-cd [repo-name]
+cd my-trade-portfolio
 
 # Install dependencies
 npm install
 # or
 pip install -r requirements.txt
-# or
-[other installation commands]
 ```
 
 ## � Repository Setup
@@ -74,7 +73,7 @@ This script will:
 ## 📁 Project Structure
 
 ```
-[repo-name]/
+my-trade-portfolio/
 ├── assets/                 # Static assets (images, icons, etc.)
 ├── data/                   # Data files and datasets
 ├── docs/                   # Documentation files
@@ -99,20 +98,43 @@ This script will:
 
 ## �📖 Usage
 
+
 ### Basic Usage
 
+#### Generate Portfolio Performance GIF
+
+This script fetches your trade and PnL data from Polymarket and generates an animated GIF showing your portfolio performance over different periods.
+
+**Requirements:**
+- Set your environment variables in a `.env` file in the project root:
+	- `WALLET`: Your Polymarket wallet address
+	- `FUNDS`: Your initial portfolio funds (numeric)
+
+**Run the script:**
 ```bash
-# Example command
-[command example]
+python scripts/create_gif.py
 ```
+The GIF will be saved to `assets/performance_animation.gif`.
+
+If you see the message `Please set WALLET and FUNDS environment variables.`, ensure your `.env` file is correctly configured.
 
 ### Advanced Usage
 
-[Provide more detailed usage examples, code snippets, or screenshots]
+
+You can customize the GIF appearance or data sources by modifying `scripts/create_gif.py`. For more advanced analytics, use the Jupyter notebooks in the `notebooks/` folder to explore your trade data interactively.
 
 ## ⚙️ Configuration
 
-[Explain configuration options, environment variables, config files, etc.]
+### Environment Variables
+
+Create a `.env` file in the project root with the following:
+
+```
+WALLET=your_polymarket_wallet_address
+FUNDS=your_initial_funds
+```
+
+These are required for the GIF generation script to fetch and display your portfolio data.
 
 ## 🤝 Contributing
 
@@ -153,7 +175,7 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 - **Hugging Face:** [https://huggingface.co/manu02](https://huggingface.co/manu02)
 - **Portfolio:** [https://devmuniz02.github.io/](https://devmuniz02.github.io/)
 
-Project Link: [https://github.com/devMuniz02/[repo-name]](https://github.com/devMuniz02/[repo-name])
+Project Link: [https://github.com/devMuniz02/my-trade-portfolio](https://github.com/devMuniz02/my-trade-portfolio)
 
 ---
 
