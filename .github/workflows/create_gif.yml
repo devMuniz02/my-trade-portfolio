@@ -34,3 +34,11 @@ jobs:
         with:
           name: performance_animation
           path: assets/performance_animation.gif
+
+      - name: Commit and push GIF
+        run: |
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+          git add assets/performance_animation.gif
+          git commit -m "Update portfolio performance GIF [auto]" || echo "No changes to commit"
+          git push
