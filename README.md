@@ -6,6 +6,8 @@
 [![GitHub issues](https://img.shields.io/github/issues/devMuniz02/my-trade-portfolio)](https://github.com/devMuniz02/my-trade-portfolio/issues)
 [![GitHub stars](https://img.shields.io/github/stars/devMuniz02/my-trade-portfolio)](https://github.com/devMuniz02/my-trade-portfolio/stargazers)
 
+![trade preformance gif](assets/performance_animation.gif)
+
 ## 📋 Table of Contents
 
 - [Features](#features)
