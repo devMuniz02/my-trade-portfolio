@@ -6,54 +6,276 @@ import matplotlib.ticker as ticker
 import matplotlib.animation as animation
 import numpy as np
 from matplotlib.patches import FancyBboxPatch
-# Add dotenv support
 from dotenv import load_dotenv
 
-# Load environment variables from .env file
 load_dotenv()
 
-# --- 1) Data Fetching ---
-def get_data():
-    DATA_API = "https://data-api.polymarket.com"
-    WALLET = os.environ.get("WALLET")
-    FUNDS = float(os.environ.get("FUNDS", 0))
-    if not WALLET or FUNDS <= 0:
-        print("Please set WALLET and FUNDS environment variables.")
-        return None, None, None
-    
-    try:
-        r_act = requests.get(f"{DATA_API}/activity", params={"user": WALLET}, timeout=20).json()
-        r_traded = requests.get(f"{DATA_API}/traded", params={"user": WALLET}, timeout=20).json().get("traded", 0)
-    except Exception:
-        return ["DAY", "WEEK", "MONTH", "ALL"], [0, 0, 0, 0], [0, 0, 0, 0]
+PERIODS = ["DAY", "WEEK", "MONTH", "ALL"]
+TRADE_ACTIVITY_TYPES = {"TRADE"}
 
-    now = datetime.now(timezone.utc)
-    intervals = {
+
+def get_period_starts(now):
+    return {
         "DAY": now.replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=timezone.utc),
         "WEEK": now - timedelta(days=7),
         "MONTH": now - timedelta(days=30),
         "ALL": datetime.min.replace(tzinfo=timezone.utc),
     }
 
-    redeem_counts = {k: 0 for k in intervals}
-    for act in r_act:
-        if act.get("type") == "REDEEM":
-            ts = datetime.fromtimestamp(act.get("timestamp"), tz=timezone.utc)
-            for period, start_time in intervals.items():
-                if ts >= start_time: redeem_counts[period] += 1
 
-    periods = ["DAY", "WEEK", "MONTH", "ALL"]
-    roi_data, trade_counts = [], []
-    for period in periods:
+def get_activity_timestamp(activity):
+    timestamp = activity.get("timestamp")
+    if timestamp is None:
+        return None
+
+    try:
+        return datetime.fromtimestamp(float(timestamp), tz=timezone.utc)
+    except (TypeError, ValueError, OSError):
+        return None
+
+
+def is_trade_activity(activity):
+    return str(activity.get("type", "")).upper() in TRADE_ACTIVITY_TYPES
+
+
+def fetch_json(url, params=None):
+    return requests.get(url, params=params, timeout=20).json()
+
+
+def fetch_all_activity(base_url, wallet, start=None, end=None):
+    items = []
+    offset = 0
+
+    while True:
+        batch = fetch_json(
+            f"{base_url}/activity",
+            params={
+                "user": wallet,
+                "limit": 500,
+                "offset": offset,
+                "start": start,
+                "end": end,
+                "sortBy": "TIMESTAMP",
+                "sortDirection": "DESC",
+            },
+        )
+        if not isinstance(batch, list) or not batch:
+            break
+
+        items.extend(batch)
+        if len(batch) < 500:
+            break
+        offset += 500
+
+    return items
+
+
+def fetch_all_closed_positions(base_url, wallet):
+    items = []
+    offset = 0
+
+    while True:
+        batch = fetch_json(
+            f"{base_url}/closed-positions",
+            params={"user": wallet, "limit": 500, "offset": offset},
+        )
+        if not isinstance(batch, list) or not batch:
+            break
+
+        items.extend(batch)
+        if len(batch) < 500:
+            break
+        offset += 500
+
+    return items
+
+
+def fetch_all_open_positions(base_url, wallet):
+    items = []
+    offset = 0
+
+    while True:
+        batch = fetch_json(
+            f"{base_url}/positions",
+            params={"user": wallet, "limit": 500, "offset": offset},
+        )
+        if not isinstance(batch, list) or not batch:
+            break
+
+        items.extend(batch)
+        if len(batch) < 500:
+            break
+        offset += 500
+
+    return items
+
+
+def fetch_price_history(asset, start_ts, end_ts):
+    try:
+        data = fetch_json(
+            "https://clob.polymarket.com/prices-history",
+            params={
+                "market": asset,
+                "startTs": start_ts,
+                "endTs": end_ts,
+                "interval": "1h",
+                "fidelity": 60,
+            },
+        )
+    except Exception:
+        return []
+
+    history = data.get("history", []) if isinstance(data, dict) else []
+    return history if isinstance(history, list) else []
+
+
+def get_price_at_period_start(asset, start_ts, end_ts, fallback_price):
+    history = fetch_price_history(asset, start_ts, end_ts)
+    if history:
+        return float(history[0].get("p", fallback_price) or fallback_price)
+    return fallback_price
+
+
+def calculate_open_position_period_pnl(position, period_activities, start_ts, end_ts):
+    asset = position.get("asset")
+    current_size = float(position.get("size", 0) or 0)
+    current_value = float(position.get("currentValue", 0) or 0)
+    current_price = float(position.get("curPrice", 0) or 0)
+    avg_price = float(position.get("avgPrice", 0) or 0)
+
+    size_delta = 0.0
+    cashflow = 0.0
+    for activity in period_activities:
+        if activity.get("asset") != asset or activity.get("type") != "TRADE":
+            continue
+
+        side = str(activity.get("side", "")).upper()
+        trade_size = float(activity.get("size", 0) or 0)
+        usdc_size = float(activity.get("usdcSize", 0) or 0)
+
+        if side == "BUY":
+            size_delta += trade_size
+            cashflow -= usdc_size
+        elif side == "SELL":
+            size_delta -= trade_size
+            cashflow += usdc_size
+
+    start_size = max(current_size - size_delta, 0.0)
+    if start_size <= 0:
+        start_value = 0.0
+    else:
+        fallback_price = current_price if current_price > 0 else avg_price
+        start_price = get_price_at_period_start(asset, start_ts, end_ts, fallback_price)
+        start_value = start_size * start_price
+
+    return current_value + cashflow - start_value
+
+
+def calculate_period_pnl(period, positions, closed_positions, activities, intervals, now_ts, funds, all_time_pnl):
+    if period == "ALL":
+        return all_time_pnl
+
+    start_ts = int(intervals[period].timestamp())
+    period_activities = [
+        item for item in activities
+        if is_trade_activity(item) and (get_activity_timestamp(item) and int(get_activity_timestamp(item).timestamp()) >= start_ts)
+    ]
+
+    open_pnl = sum(
+        calculate_open_position_period_pnl(position, period_activities, start_ts, now_ts)
+        for position in positions
+    )
+
+    realized_pnl = 0.0
+    for item in closed_positions:
+        try:
+            timestamp = int(float(item.get("timestamp", 0) or 0))
+            if timestamp >= start_ts:
+                realized_pnl += float(item.get("realizedPnl", 0) or 0)
+        except (TypeError, ValueError):
+            continue
+
+    return open_pnl + realized_pnl
+
+
+def fetch_metrics():
+    DATA_API = "https://data-api.polymarket.com"
+    WALLET = os.environ.get("WALLET")
+    FUNDS = float(os.environ.get("FUNDS", 0))
+    if not WALLET or FUNDS <= 0:
+        print("Please set WALLET and FUNDS environment variables.")
+        return None
+
+    try:
+        r_act = fetch_all_activity(DATA_API, WALLET)
+        r_traded = fetch_json(f"{DATA_API}/traded", params={"user": WALLET}).get("traded", 0)
+        positions = fetch_all_open_positions(DATA_API, WALLET)
+        closed_positions = fetch_all_closed_positions(DATA_API, WALLET)
+    except Exception:
+        return [{"period": period, "roi": 0, "trades": 0} for period in PERIODS]
+
+    now = datetime.now(timezone.utc)
+    intervals = get_period_starts(now)
+    trade_counts = {period: 0 for period in PERIODS}
+
+    for act in r_act:
+        if not is_trade_activity(act):
+            continue
+
+        ts = get_activity_timestamp(act)
+        if ts is None:
+            continue
+
+        for period, start_time in intervals.items():
+            if ts >= start_time:
+                trade_counts[period] += 1
+
+    try:
+        trade_counts["ALL"] = max(trade_counts["ALL"], int(float(r_traded or 0)))
+    except (TypeError, ValueError):
+        pass
+
+    pnl_by_period = {}
+    for period in PERIODS:
         url = f"{DATA_API}/v1/leaderboard?category=OVERALL&timePeriod={period}&orderBy=PNL&user={WALLET}"
         try:
             res = requests.get(url, timeout=20).json()
             top = res[0] if isinstance(res, list) and len(res) > 0 else {}
-            pnl = float(top.get("pnl", 0) or 0)
-            roi = (pnl / FUNDS) * 100 if FUNDS > 0 else 0
-        except Exception: roi = 0
-        roi_data.append(roi)
-        trade_counts.append(redeem_counts[period] + (r_traded - redeem_counts["ALL"]))
+            pnl_by_period[period] = float(top.get("pnl", 0) or 0)
+        except Exception:
+            pnl_by_period[period] = 0
+
+    now_ts = int(now.timestamp())
+    all_time_pnl = pnl_by_period["ALL"]
+    current_portfolio_value = FUNDS + all_time_pnl
+    metrics = []
+    for period in PERIODS:
+        pnl = calculate_period_pnl(period, positions, closed_positions, r_act, intervals, now_ts, FUNDS, all_time_pnl)
+        if period == "ALL":
+            baseline_value = FUNDS
+        else:
+            baseline_value = current_portfolio_value - pnl
+
+        roi = (pnl / baseline_value) * 100 if baseline_value > 0 else 0
+
+        metrics.append({
+            "period": period,
+            "roi": roi,
+            "trades": trade_counts[period],
+        })
+
+    return metrics
+
+
+# --- 1) Data Fetching ---
+def get_data():
+    metrics = fetch_metrics()
+    if metrics is None:
+        return None, None, None
+
+    periods = [item["period"] for item in metrics]
+    roi_data = [item["roi"] for item in metrics]
+    trade_counts = [item["trades"] for item in metrics]
     return periods, roi_data, trade_counts
 
 # --- 2) Animation Logic ---
