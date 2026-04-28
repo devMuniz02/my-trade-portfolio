@@ -12,11 +12,18 @@ load_dotenv()
 
 PERIODS = ["DAY", "WEEK", "MONTH", "ALL"]
 TRADE_ACTIVITY_TYPES = {"TRADE"}
+POSITIVE_CASH_ACTIVITY_TYPES = {"REDEEM", "REWARD", "REFERRAL_REWARD", "MAKER_REBATE"}
+POLYGON_RPC_URLS = [
+    os.environ.get("POLYGON_RPC_URL", "").strip(),
+    "https://polygon-bor-rpc.publicnode.com",
+    "https://polygon.drpc.org",
+]
+PUSD_TOKEN_ADDRESS = "0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB"
 
 
 def get_period_starts(now):
     return {
-        "DAY": now.replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=timezone.utc),
+        "DAY": now - timedelta(days=1),
         "WEEK": now - timedelta(days=7),
         "MONTH": now - timedelta(days=30),
         "ALL": datetime.min.replace(tzinfo=timezone.utc),
@@ -40,6 +47,44 @@ def is_trade_activity(activity):
 
 def fetch_json(url, params=None):
     return requests.get(url, params=params, timeout=20).json()
+
+
+def fetch_current_cash_balance(wallet):
+    wallet_hex = wallet.lower().removeprefix("0x")
+    if len(wallet_hex) != 40:
+        raise ValueError("Wallet address must be 20 bytes.")
+
+    method_selector = "70a08231"  # balanceOf(address)
+    padded_wallet = wallet_hex.rjust(64, "0")
+    call_data = f"0x{method_selector}{padded_wallet}"
+    payload = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "eth_call",
+        "params": [
+            {"to": PUSD_TOKEN_ADDRESS, "data": call_data},
+            "latest",
+        ],
+    }
+
+    errors = []
+    for rpc_url in POLYGON_RPC_URLS:
+        if not rpc_url:
+            continue
+
+        try:
+            response = requests.post(rpc_url, json=payload, timeout=20)
+            response.raise_for_status()
+            body = response.json()
+            result = body.get("result")
+            if isinstance(result, str):
+                raw_balance = int(result, 16)
+                return raw_balance / 1_000_000
+            errors.append(f"{rpc_url}: {body}")
+        except Exception as exc:
+            errors.append(f"{rpc_url}: {exc}")
+
+    raise RuntimeError("Unable to fetch pUSD balance. " + " | ".join(errors))
 
 
 def fetch_all_activity(base_url, wallet, start=None, end=None):
@@ -97,7 +142,7 @@ def fetch_all_open_positions(base_url, wallet):
     while True:
         batch = fetch_json(
             f"{base_url}/positions",
-            params={"user": wallet, "limit": 500, "offset": offset},
+            params={"user": wallet, "limit": 500, "offset": offset, "sizeThreshold": 0},
         )
         if not isinstance(batch, list) or not batch:
             break
@@ -136,71 +181,156 @@ def get_price_at_period_start(asset, start_ts, end_ts, fallback_price):
     return fallback_price
 
 
-def calculate_open_position_period_pnl(position, period_activities, start_ts, end_ts):
-    asset = position.get("asset")
-    current_size = float(position.get("size", 0) or 0)
-    current_value = float(position.get("currentValue", 0) or 0)
-    current_price = float(position.get("curPrice", 0) or 0)
-    avg_price = float(position.get("avgPrice", 0) or 0)
+def build_current_position_lookup(positions):
+    current_lookup = {}
+    for item in positions:
+        asset = item.get("asset")
+        if not asset:
+            continue
+        current_lookup[asset] = {
+            "size": float(item.get("size", 0) or 0),
+            "value": float(item.get("currentValue", 0) or 0),
+            "cur_price": float(item.get("curPrice", 0) or 0),
+            "avg_price": float(item.get("avgPrice", 0) or 0),
+        }
 
-    size_delta = 0.0
-    cashflow = 0.0
-    for activity in period_activities:
-        if activity.get("asset") != asset or activity.get("type") != "TRADE":
+    return current_lookup
+
+
+def get_period_trade_activities(activities, start_ts):
+    period_activities = []
+    for item in activities:
+        if not is_trade_activity(item):
             continue
 
-        side = str(activity.get("side", "")).upper()
-        trade_size = float(activity.get("size", 0) or 0)
-        usdc_size = float(activity.get("usdcSize", 0) or 0)
+        ts = get_activity_timestamp(item)
+        if ts is None or int(ts.timestamp()) < start_ts:
+            continue
 
+        period_activities.append(item)
+
+    return period_activities
+
+
+def calculate_trade_cashflow(trade_activities):
+    cashflow = 0.0
+    for item in trade_activities:
+        side = str(item.get("side", "")).upper()
+        usdc_size = float(item.get("usdcSize", 0) or 0)
         if side == "BUY":
-            size_delta += trade_size
             cashflow -= usdc_size
         elif side == "SELL":
-            size_delta -= trade_size
+            cashflow += usdc_size
+    return cashflow
+
+
+def calculate_total_cashflow(activities):
+    cashflow = 0.0
+    for item in activities:
+        activity_type = str(item.get("type", "")).upper()
+        usdc_size = float(item.get("usdcSize", 0) or 0)
+
+        if activity_type in TRADE_ACTIVITY_TYPES:
+            side = str(item.get("side", "")).upper()
+            if side == "BUY":
+                cashflow -= usdc_size
+            elif side == "SELL":
+                cashflow += usdc_size
+        elif activity_type in POSITIVE_CASH_ACTIVITY_TYPES:
             cashflow += usdc_size
 
-    start_size = max(current_size - size_delta, 0.0)
-    if start_size <= 0:
-        start_value = 0.0
-    else:
-        fallback_price = current_price if current_price > 0 else avg_price
-        start_price = get_price_at_period_start(asset, start_ts, end_ts, fallback_price)
-        start_value = start_size * start_price
-
-    return current_value + cashflow - start_value
+    return cashflow
 
 
-def calculate_period_pnl(period, positions, closed_positions, activities, intervals, now_ts, funds, all_time_pnl):
-    if period == "ALL":
-        return all_time_pnl
+def calculate_historical_positions_value(current_positions, period_activities, start_ts, now_ts):
+    activities_by_asset = {}
+    for item in period_activities:
+        asset = item.get("asset")
+        if not asset:
+            continue
+        activities_by_asset.setdefault(asset, []).append(item)
 
-    start_ts = int(intervals[period].timestamp())
-    period_activities = [
-        item for item in activities
-        if is_trade_activity(item) and (get_activity_timestamp(item) and int(get_activity_timestamp(item).timestamp()) >= start_ts)
-    ]
+    assets = set(current_positions.keys()) | set(activities_by_asset.keys())
+    historical_value = 0.0
 
-    open_pnl = sum(
-        calculate_open_position_period_pnl(position, period_activities, start_ts, now_ts)
-        for position in positions
-    )
+    for asset in assets:
+        current_position = current_positions.get(asset, {})
+        current_size = float(current_position.get("size", 0) or 0)
+        fallback_price = float(current_position.get("cur_price", 0) or 0)
+        if fallback_price <= 0:
+            fallback_price = float(current_position.get("avg_price", 0) or 0)
 
-    realized_pnl = 0.0
-    for item in closed_positions:
-        try:
-            timestamp = int(float(item.get("timestamp", 0) or 0))
-            if timestamp >= start_ts:
-                realized_pnl += float(item.get("realizedPnl", 0) or 0)
-        except (TypeError, ValueError):
+        size_delta = 0.0
+        for activity in activities_by_asset.get(asset, []):
+            side = str(activity.get("side", "")).upper()
+            trade_size = float(activity.get("size", 0) or 0)
+            if side == "BUY":
+                size_delta += trade_size
+            elif side == "SELL":
+                size_delta -= trade_size
+
+            if fallback_price <= 0:
+                fallback_price = float(activity.get("price", 0) or 0)
+
+        historical_size = current_size - size_delta
+        if historical_size <= 0:
             continue
 
-    return open_pnl + realized_pnl
+        start_price = get_price_at_period_start(asset, start_ts, now_ts, fallback_price)
+        historical_value += historical_size * start_price
+
+    return historical_value
+
+
+def calculate_period_snapshot(period, current_cash_balance, current_positions_value, current_positions, activities, intervals, now_ts, funds):
+    current_total_value = current_cash_balance + current_positions_value
+
+    if period == "ALL":
+        baseline_value = funds
+        roi = ((current_total_value - baseline_value) / baseline_value) * 100 if baseline_value > 0 else 0
+        return {
+            "current_total_value": current_total_value,
+            "baseline_total_value": baseline_value,
+            "baseline_cash_balance": funds,
+            "baseline_positions_value": 0.0,
+            "roi": roi,
+        }
+
+    start_ts = int(intervals[period].timestamp())
+    period_activities = get_period_trade_activities(activities, start_ts)
+    period_all_activities = []
+    for item in activities:
+        ts = get_activity_timestamp(item)
+        if ts is None or int(ts.timestamp()) < start_ts:
+            continue
+        period_all_activities.append(item)
+
+    period_cashflow = calculate_total_cashflow(period_all_activities)
+    historical_cash_balance = current_cash_balance - period_cashflow
+    historical_positions_value = calculate_historical_positions_value(
+        current_positions,
+        period_activities,
+        start_ts,
+        now_ts,
+    )
+    historical_total_value = historical_cash_balance + historical_positions_value
+
+    roi = 0.0
+    if historical_total_value > 0:
+        roi = ((current_total_value - historical_total_value) / historical_total_value) * 100
+
+    return {
+        "current_total_value": current_total_value,
+        "baseline_total_value": historical_total_value,
+        "baseline_cash_balance": historical_cash_balance,
+        "baseline_positions_value": historical_positions_value,
+        "roi": roi,
+    }
 
 
 def fetch_metrics():
     DATA_API = "https://data-api.polymarket.com"
-    WALLET = os.environ.get("WALLET")
+    WALLET = os.environ.get("POLYMARKET_PROXY_WALLET") or os.environ.get("WALLET")
     FUNDS = float(os.environ.get("FUNDS", 0))
     if not WALLET or FUNDS <= 0:
         print("Please set WALLET and FUNDS environment variables.")
@@ -210,9 +340,10 @@ def fetch_metrics():
         r_act = fetch_all_activity(DATA_API, WALLET)
         r_traded = fetch_json(f"{DATA_API}/traded", params={"user": WALLET}).get("traded", 0)
         positions = fetch_all_open_positions(DATA_API, WALLET)
-        closed_positions = fetch_all_closed_positions(DATA_API, WALLET)
-    except Exception:
-        return [{"period": period, "roi": 0, "trades": 0} for period in PERIODS]
+        current_cash_balance = fetch_current_cash_balance(WALLET)
+    except Exception as exc:
+        print(f"Failed to fetch metrics: {exc}")
+        return None
 
     now = datetime.now(timezone.utc)
     intervals = get_period_starts(now)
@@ -235,33 +366,32 @@ def fetch_metrics():
     except (TypeError, ValueError):
         pass
 
-    pnl_by_period = {}
-    for period in PERIODS:
-        url = f"{DATA_API}/v1/leaderboard?category=OVERALL&timePeriod={period}&orderBy=PNL&user={WALLET}"
-        try:
-            res = requests.get(url, timeout=20).json()
-            top = res[0] if isinstance(res, list) and len(res) > 0 else {}
-            pnl_by_period[period] = float(top.get("pnl", 0) or 0)
-        except Exception:
-            pnl_by_period[period] = 0
-
     now_ts = int(now.timestamp())
-    all_time_pnl = pnl_by_period["ALL"]
-    current_portfolio_value = FUNDS + all_time_pnl
+    current_positions = build_current_position_lookup(positions)
+    current_positions_value = sum(float(position.get("value", 0) or 0) for position in current_positions.values())
     metrics = []
     for period in PERIODS:
-        pnl = calculate_period_pnl(period, positions, closed_positions, r_act, intervals, now_ts, FUNDS, all_time_pnl)
-        if period == "ALL":
-            baseline_value = FUNDS
-        else:
-            baseline_value = current_portfolio_value - pnl
-
-        roi = (pnl / baseline_value) * 100 if baseline_value > 0 else 0
+        period_snapshot = calculate_period_snapshot(
+            period,
+            current_cash_balance,
+            current_positions_value,
+            current_positions,
+            r_act,
+            intervals,
+            now_ts,
+            FUNDS,
+        )
 
         metrics.append({
             "period": period,
-            "roi": roi,
+            "roi": period_snapshot["roi"],
             "trades": trade_counts[period],
+            "value_now": period_snapshot["current_total_value"],
+            "value_then": period_snapshot["baseline_total_value"],
+            "cash_now": current_cash_balance,
+            "positions_now": current_positions_value,
+            "cash_then": period_snapshot["baseline_cash_balance"],
+            "positions_then": period_snapshot["baseline_positions_value"],
         })
 
     return metrics
